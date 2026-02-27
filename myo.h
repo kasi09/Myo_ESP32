@@ -15,6 +15,7 @@
 class myo
 {
   public:
+    myo(const char* address = "f9:64:aa:5e:d8:ef");
     void getMyoInfo();
     void getFirmwareVersion();
     void connect();
@@ -22,8 +23,8 @@ class myo
     void IMUNotify();
     void BATTNotify();
     void getAllData();
-    
-    BLEAddress pAddress = BLEAddress("f9:64:aa:5e:d8:ef");
+
+    BLEAddress pAddress;
     BLEClient* pClient;
     
     int temp; 
@@ -49,7 +50,7 @@ class myo
     uint8_t fw_has_custom_classifier;
     uint8_t fw_stream_indicating;
     uint8_t fw_sku;
-    uint8_t fw_reserved[7];
+    uint8_t fw_reserved[8];
 
     
   private:
