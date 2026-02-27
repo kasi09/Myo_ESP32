@@ -1,6 +1,21 @@
 
 #include "Arduino.h"
 #include "myo.h"
+#include <math.h>
+
+// ── BLE scan-by-name callback ─────────────────────────────────────────────────
+static BLEAddress* g_foundAddress = nullptr;
+
+class MyoScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice dev) {
+    if(dev.haveName() && dev.getName().find("Myo") != std::string::npos) {
+      Serial.print("Found Myo: ");
+      Serial.println(dev.getAddress().toString().c_str());
+      g_foundAddress = new BLEAddress(dev.getAddress());
+      dev.getScan()->stop();
+    }
+  }
+};
 
 // ── Auto-reconnect: BLE client callbacks ─────────────────────────────────────
 class MyoClientCallbacks : public BLEClientCallbacks {
@@ -15,11 +30,21 @@ public:
     m->BATTNotifyDone  = false;
     m->PoseNotifyDone  = false;
     m->getAllDataDone   = false;
+    m->unlockDone      = false;
+    m->armSynced       = false;
     Serial.println("BLE disconnected – reconnecting...");
   }
 };
 
-// ── Constructor ───────────────────────────────────────────────────────────────
+// ── Constructors ──────────────────────────────────────────────────────────────
+myo::myo() : pAddress("00:00:00:00:00:00") {
+  autoScan = true;
+  memset(emg, 0, sizeof(emg));
+  memset(imu_quat,  0, sizeof(imu_quat));
+  memset(imu_accel, 0, sizeof(imu_accel));
+  memset(imu_gyro,  0, sizeof(imu_gyro));
+}
+
 myo::myo(const char* address) : pAddress(address) {
   memset(emg, 0, sizeof(emg));
   memset(imu_quat,  0, sizeof(imu_quat));
@@ -31,9 +56,28 @@ myo::myo(const char* address) : pAddress(address) {
 void myo::connect() {
   if(!myo::connected) {
     BLEDevice::init("");
-    BLEScan* pBLEScan = BLEDevice::getScan();
-    pBLEScan->setActiveScan(true);
-    pBLEScan->start(10);
+
+    if(myo::autoScan) {
+      // Find Myo by BLE device name
+      g_foundAddress = nullptr;
+      BLEScan* pScan = BLEDevice::getScan();
+      pScan->setAdvertisedDeviceCallbacks(new MyoScanCallbacks());
+      pScan->setActiveScan(true);
+      pScan->start(10);
+      if(!g_foundAddress) {
+        Serial.println("No Myo found by name – retrying...");
+        return;
+      }
+      myo::pAddress = *g_foundAddress;
+      delete g_foundAddress;
+      g_foundAddress = nullptr;
+    } else {
+      // Fixed address: scan passively first (ESP32 BLE requires it)
+      BLEScan* pScan = BLEDevice::getScan();
+      pScan->setActiveScan(true);
+      pScan->start(10);
+    }
+
     myo::pClient = BLEDevice::createClient();
     myo::pClient->setClientCallbacks(new MyoClientCallbacks(this));
     if(!myo::pClient->connect(myo::pAddress)) {
@@ -61,6 +105,38 @@ void myo::getAllData() {
     pChr->writeValue(writeVal, sizeof(writeVal));
     myo::getAllDataDone = true;
   }
+}
+
+// ── unlock (hold-unlock: prevents auto-lock) ──────────────────────────────────
+void myo::unlock() {
+  if(!myo::connected || myo::unlockDone) return;
+  BLEUUID tservice = BLEUUID("d5060001-a904-deb9-4748-2c7f4a124842");
+  BLEUUID tcharacteristic = BLEUUID("d5060401-a904-deb9-4748-2c7f4a124842");
+
+  BLERemoteService* pSvc = myo::pClient->getService(tservice);
+  if(!pSvc) { Serial.println("unlock: Service not found"); return; }
+  BLERemoteCharacteristic* pChr = pSvc->getCharacteristic(tcharacteristic);
+  if(!pChr) { Serial.println("unlock: Characteristic not found"); return; }
+
+  uint8_t cmd[] = {0x0a, 0x01, 0x01};  // hold-unlock
+  pChr->writeValue(cmd, sizeof(cmd));
+  myo::unlockDone = true;
+}
+
+// ── lock ──────────────────────────────────────────────────────────────────────
+void myo::lock() {
+  if(!myo::connected) return;
+  BLEUUID tservice = BLEUUID("d5060001-a904-deb9-4748-2c7f4a124842");
+  BLEUUID tcharacteristic = BLEUUID("d5060401-a904-deb9-4748-2c7f4a124842");
+
+  BLERemoteService* pSvc = myo::pClient->getService(tservice);
+  if(!pSvc) { Serial.println("lock: Service not found"); return; }
+  BLERemoteCharacteristic* pChr = pSvc->getCharacteristic(tcharacteristic);
+  if(!pChr) { Serial.println("lock: Characteristic not found"); return; }
+
+  uint8_t cmd[] = {0x0a, 0x01, 0x00};
+  pChr->writeValue(cmd, sizeof(cmd));
+  myo::unlockDone = false;
 }
 
 // ── EMGNotify ─────────────────────────────────────────────────────────────────
@@ -184,17 +260,62 @@ void myo::parseIMU(uint8_t* data, size_t len) {
 }
 
 // ── parsePose ─────────────────────────────────────────────────────────────────
-// Classifier event packet:
-//   byte[0] = event type: 0x03 = pose event
-//   byte[1] = pose id: 0=Rest, 1=Fist, 2=WaveIn, 3=WaveOut, 4=FingersSpread, 5=DoubleTap
+// Classifier event types:
+//   0x01 = arm synced   (byte[1]=arm: 0=right,1=left; byte[2]=x_direction)
+//   0x02 = arm unsynced
+//   0x03 = pose event   (byte[1]=pose id)
+//   0x05 = locked
+//   0x06 = unlocked
 void myo::parsePose(uint8_t* data, size_t len) {
-  if(len < 2) return;
-  if(data[0] != 0x03) return;  // only handle pose events
-  uint8_t id = data[1];
-  currentPose = (id <= 5) ? (MyoPose)id : POSE_UNKNOWN;
-  const char* names[] = {"Rest", "Fist", "WaveIn", "WaveOut", "FingersSpread", "DoubleTap"};
-  Serial.print("Pose: ");
-  Serial.println(id <= 5 ? names[id] : "Unknown");
+  if(len < 1) return;
+  static const char* poseNames[] = {"Rest","Fist","WaveIn","WaveOut","FingersSpread","DoubleTap"};
+  switch(data[0]) {
+    case 0x01:
+      if(len >= 2) {
+        armSynced = true;
+        arm = data[1];
+        Serial.print("Arm synced: ");
+        Serial.println(arm == 0 ? "Right" : "Left");
+      }
+      break;
+    case 0x02:
+      armSynced = false;
+      Serial.println("Arm unsynced");
+      break;
+    case 0x03:
+      if(len >= 2) {
+        uint8_t id = data[1];
+        currentPose = (id <= 5) ? (MyoPose)id : POSE_UNKNOWN;
+        Serial.print("Pose: ");
+        Serial.println(id <= 5 ? poseNames[id] : "Unknown");
+      }
+      break;
+    case 0x05:
+      Serial.println("Myo locked");
+      break;
+    case 0x06:
+      Serial.println("Myo unlocked");
+      break;
+  }
+}
+
+// ── getEuler ──────────────────────────────────────────────────────────────────
+// Converts imu_quat (int16, scale /16384) to Euler angles in degrees.
+// roll  = rotation around X axis (-180..+180)
+// pitch = rotation around Y axis (-90..+90)
+// yaw   = rotation around Z axis (-180..+180)
+void myo::getEuler(float &roll, float &pitch, float &yaw) {
+  float w = imu_quat[0] / 16384.0f;
+  float x = imu_quat[1] / 16384.0f;
+  float y = imu_quat[2] / 16384.0f;
+  float z = imu_quat[3] / 16384.0f;
+
+  roll  = atan2f(2.0f * (w*x + y*z), 1.0f - 2.0f * (x*x + y*y)) * 57.29578f;
+
+  float sinp = 2.0f * (w*y - z*x);
+  pitch = (fabsf(sinp) >= 1.0f) ? copysignf(90.0f, sinp) : asinf(sinp) * 57.29578f;
+
+  yaw   = atan2f(2.0f * (w*z + x*y), 1.0f - 2.0f * (y*y + z*z)) * 57.29578f;
 }
 
 // ── printCSVHeader ────────────────────────────────────────────────────────────
@@ -206,7 +327,6 @@ void myo::printCSVHeader() {
 }
 
 // ── printCSVLine ──────────────────────────────────────────────────────────────
-// Call with label 0-9 to record a labeled training sample
 void myo::printCSVLine(uint8_t label) {
   Serial.print(label);
   for(int s = 0; s < 2; s++)

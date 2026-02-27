@@ -25,13 +25,14 @@ enum MyoPose {
 class myo
 {
   public:
-    myo(const char* address = "f9:64:aa:5e:d8:ef");
+    myo();                              // auto-scan: find Myo by BLE name
+    myo(const char* address);           // connect to fixed MAC address
 
     // BLE setup
     void connect();
     void getAllData();     // start all sensor streaming
 
-    // Notifications
+    // Notifications (call once after connect)
     void EMGNotify();
     void IMUNotify();
     void BATTNotify();
@@ -43,11 +44,16 @@ class myo
 
     // Commands
     void vibrate(uint8_t type);   // 1=short, 2=medium, 3=long
+    void unlock();                // hold-unlock (prevents auto-lock)
+    void lock();
 
     // Data parsing (call from BLE callbacks in .ino)
     void parseEMG(uint8_t* data, size_t len);
     void parseIMU(uint8_t* data, size_t len);
     void parsePose(uint8_t* data, size_t len);
+
+    // Computed orientation
+    void getEuler(float &roll, float &pitch, float &yaw);
 
     // AI training data output
     void printCSVHeader();
@@ -59,6 +65,7 @@ class myo
 
     // State flags
     bool connected              = false;
+    bool autoScan               = false;
     bool initDo                 = true;
     bool getMyoInfoDone         = false;
     bool getFirmwareVersionDone = false;
@@ -67,6 +74,11 @@ class myo
     bool BATTNotifyDone         = false;
     bool PoseNotifyDone         = false;
     bool getAllDataDone          = false;
+    bool unlockDone             = false;
+
+    // Arm state (from classifier sync event)
+    bool    armSynced = false;
+    uint8_t arm       = 0;   // 0 = right, 1 = left
 
     // Firmware info
     uint16_t fw_major;

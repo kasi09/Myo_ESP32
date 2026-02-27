@@ -6,13 +6,17 @@ Enables real-time streaming of EMG (electromyography) and IMU sensor data.
 ## Features
 
 - BLE connection to Myo armband with **auto-reconnect**
+- **Auto-scan by BLE name** — no MAC address needed (`myo myo;`)
 - **EMG** data streaming (8 channels, 2 samples per notification packet)
 - **IMU** data parsing — Quaternion, Accelerometer, Gyroscope (int16 raw + scale factors)
+- **Euler angles** — Roll / Pitch / Yaw in degrees computed from quaternion
 - **Pose / Gesture detection** — Rest, Fist, WaveIn, WaveOut, FingersSpread, DoubleTap
+- **Arm sync state** — detects which arm (left/right) and sync status
+- **Unlock / Lock** control — prevents auto-lock during data collection
 - **Vibration** control (short / medium / long)
 - Battery level monitoring
 - **CSV output for AI/ML training** — labeled samples via Serial command
-- Configurable BLE device address via constructor
+- **Python data collector** (`collect_data.py`) — saves labeled CSV to disk automatically
 
 ## Hardware Requirements
 
@@ -31,8 +35,11 @@ Install via Arduino IDE Board Manager / Library Manager:
 ```cpp
 #include "myo.h"
 
-// Use default address or pass your Myo's BLE address
-myo myo("f9:64:aa:5e:d8:ef");
+// Option A: auto-scan (finds any Myo by BLE name – no address needed)
+myo myo;
+
+// Option B: fixed address (faster reconnect if you know the MAC)
+// myo myo("f9:64:aa:5e:d8:ef");
 
 void setup() {
   Serial.begin(115200);
@@ -41,6 +48,7 @@ void setup() {
 void loop() {
   myo.connect();           // auto-reconnect if disconnected
   myo.getAllData();        // start EMG + IMU + classifier streaming
+  myo.unlock();          // hold-unlock: prevents auto-lock
   myo.EMGNotify();
   myo.IMUNotify();
   myo.BATTNotify();
@@ -85,9 +93,12 @@ Copy the output into a `.csv` file for training with scikit-learn, TensorFlow, e
 
 | Method | Description |
 |---|---|
-| `myo(address)` | Constructor — optional BLE MAC address string |
+| `myo()` | Constructor — auto-scan, finds Myo by BLE device name |
+| `myo(address)` | Constructor — connect to fixed MAC address |
 | `connect()` | Connect to Myo; auto-reconnect after disconnect |
 | `getAllData()` | Set mode: EMG stream + IMU all + classifier enabled |
+| `unlock()` | Hold-unlock: prevents the Myo from auto-locking |
+| `lock()` | Lock the Myo |
 
 ### Notifications (call once after connect)
 
@@ -105,6 +116,18 @@ Copy the output into a `.csv` file for training with scikit-learn, TensorFlow, e
 | `parseEMG(data, len)` | Parse 16-byte EMG packet → `emg[2][8]` |
 | `parseIMU(data, len)` | Parse 20-byte IMU packet → `imu_quat/accel/gyro` |
 | `parsePose(data, len)` | Parse classifier event → `currentPose`, prints to Serial |
+
+### Computed orientation
+
+| Method | Description |
+|---|---|
+| `getEuler(roll, pitch, yaw)` | Converts `imu_quat` to Euler angles in degrees (float by reference) |
+
+```cpp
+float roll, pitch, yaw;
+myo.getEuler(roll, pitch, yaw);
+Serial.printf("Roll: %.1f  Pitch: %.1f  Yaw: %.1f\n", roll, pitch, yaw);
+```
 
 ### Commands
 
@@ -124,12 +147,30 @@ Copy the output into a `.csv` file for training with scikit-learn, TensorFlow, e
 ### Sensor data (public members, updated by parse* methods)
 
 ```cpp
-int8_t  emg[2][8];    // 2 samples x 8 channels
-int16_t imu_quat[4];  // w, x, y, z
-int16_t imu_accel[3]; // x, y, z
-int16_t imu_gyro[3];  // x, y, z
-MyoPose currentPose;  // REST, FIST, WAVE_IN, WAVE_OUT, FINGERS_SPREAD, DOUBLE_TAP
+int8_t   emg[2][8];    // 2 samples x 8 channels
+int16_t  imu_quat[4];  // w, x, y, z
+int16_t  imu_accel[3]; // x, y, z
+int16_t  imu_gyro[3];  // x, y, z
+MyoPose  currentPose;  // REST, FIST, WAVE_IN, WAVE_OUT, FINGERS_SPREAD, DOUBLE_TAP
+bool     armSynced;    // true after arm-sync gesture
+uint8_t  arm;          // 0 = right, 1 = left
 ```
+
+## Python Data Collector
+
+`collect_data.py` receives labeled samples from the ESP32 and saves them to a CSV file.
+
+```bash
+pip install pyserial
+python collect_data.py
+```
+
+Then in the Arduino Serial Monitor:
+- `h` — send CSV header (once at the start)
+- `0`–`9` — record a sample with that label
+- `s` / `m` / `l` — vibrate for tactile feedback during recording
+
+The script shows a live counter per label and prints ESP32 status messages (Pose:, Battery:, etc.) separately. Press **Ctrl+C** to stop and see the label distribution.
 
 ## BLE UUIDs
 
@@ -143,7 +184,14 @@ MyoPose currentPose;  // REST, FIST, WAVE_IN, WAVE_OUT, FINGERS_SPREAD, DOUBLE_T
 
 ## Changelog
 
-### 2024 – Extensions
+### 2024 – Extensions (2)
+- BLE auto-scan by device name — `myo myo;` finds any Myo without knowing the MAC address
+- Unlock/lock commands — `unlock()` sends hold-unlock to prevent auto-lock during sessions
+- Arm sync state — `parsePose()` now handles all classifier events (sync, unsync, lock, unlock)
+- Euler angles — `getEuler(roll, pitch, yaw)` converts quaternion to degrees
+- Python data collector — `collect_data.py` saves labeled CSV samples automatically
+
+### 2024 – Extensions (1)
 - IMU data fully parsed: Quaternion, Accelerometer, Gyroscope (int16 raw, documented scale factors)
 - Pose / gesture detection via classifier events (Fist, WaveIn/Out, FingersSpread, DoubleTap, Rest)
 - Vibration command: `vibrate(1/2/3)` for short / medium / long

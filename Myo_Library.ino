@@ -7,8 +7,11 @@
 #include <stdint.h>
 #include <BLEValue.h>
 
-// ── Change this to your Myo's BLE address ────────────────────────────────────
-myo myo("f9:64:aa:5e:d8:ef");
+// ── Choose connection mode ────────────────────────────────────────────────────
+// Option A – auto-scan: finds any Myo by BLE name (no address needed)
+myo myo;
+// Option B – fixed address: faster reconnect if you know the MAC
+// myo myo("f9:64:aa:5e:d8:ef");
 
 bool notifyRegistered = false;
 
@@ -37,14 +40,13 @@ void emgCallback(BLERemoteCharacteristic*, uint8_t* pData, size_t length, bool) 
 // IMU: 20 bytes – quaternion, accelerometer, gyroscope (all int16 little-endian)
 void imuCallback(BLERemoteCharacteristic*, uint8_t* pData, size_t length, bool) {
   myo.parseIMU(pData, length);
-  // Uncomment to print live IMU (scale factors: quat/16384, accel/2048g, gyro/16 deg/s):
-  // Serial.printf("Q: %d %d %d %d  A: %d %d %d  G: %d %d %d\n",
-  //   myo.imu_quat[0], myo.imu_quat[1], myo.imu_quat[2], myo.imu_quat[3],
-  //   myo.imu_accel[0], myo.imu_accel[1], myo.imu_accel[2],
-  //   myo.imu_gyro[0],  myo.imu_gyro[1],  myo.imu_gyro[2]);
+  // Uncomment to print live Euler angles (roll/pitch/yaw in degrees):
+  // float roll, pitch, yaw;
+  // myo.getEuler(roll, pitch, yaw);
+  // Serial.printf("Roll: %.1f  Pitch: %.1f  Yaw: %.1f\n", roll, pitch, yaw);
 }
 
-// Classifier events: pose detection
+// Classifier events: pose detection, arm sync, lock/unlock
 void poseCallback(BLERemoteCharacteristic*, uint8_t* pData, size_t length, bool) {
   myo.parsePose(pData, length);
 }
@@ -61,7 +63,7 @@ void registerCallbacks() {
     if(pChr) pChr->registerForNotify(batteryCallback);
   }
 
-  // EMG (4 characteristics, we use the first one; all carry the same interleaved stream)
+  // EMG (4 characteristics, each carries 2 samples of 8 channels)
   pSvc = myo.pClient->getService(BLEUUID("d5060005-a904-deb9-4748-2c7f4a124842"));
   if(pSvc) {
     const char* emgUUIDs[4] = {
@@ -101,6 +103,7 @@ void setup() {
   Serial.println("  h      – print CSV header");
   Serial.println("  0-9    – record labeled CSV sample");
   Serial.println("  s/m/l  – vibrate short/medium/long");
+  Serial.println("  u      – unlock (hold)");
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
@@ -109,9 +112,11 @@ void loop() {
 
   if(myo.connected) {
     myo.getAllData();
+    myo.unlock();          // hold-unlock: prevents auto-lock after inactivity
 
     if(!notifyRegistered) {
       registerCallbacks();
+      notifyRegistered = true;
     }
 
     myo.EMGNotify();
@@ -132,6 +137,9 @@ void loop() {
         myo.vibrate(2);  // medium
       } else if(cmd == 'l') {
         myo.vibrate(3);  // long
+      } else if(cmd == 'u') {
+        myo.unlockDone = false;
+        myo.unlock();
       }
     }
   }
